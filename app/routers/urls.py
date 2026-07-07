@@ -119,3 +119,31 @@ def redirect_to_url(
         )
 
     return RedirectResponse(url=original_url, status_code=302)
+
+
+@router.get("/stats/{code}", response_model=schemas.StatsOut)
+def get_stats(code: str, db: Session = Depends(get_db)):
+    """
+    Returns total click count and the 10 most recent clicks for a short code.
+    """
+    url_obj = db.query(models.URL).filter(
+        models.URL.short_code == code
+    ).first()
+
+    if not url_obj:
+        raise HTTPException(status_code=404, detail="Short URL not found")
+
+    total_clicks = len(url_obj.clicks)
+
+    recent_clicks = sorted(
+        url_obj.clicks,
+        key=lambda c: c.clicked_at,
+        reverse=True
+    )[:10]
+
+    return {
+        "short_code": code,
+        "original_url": url_obj.original_url,
+        "total_clicks": total_clicks,
+        "recent_clicks": recent_clicks,
+    }
