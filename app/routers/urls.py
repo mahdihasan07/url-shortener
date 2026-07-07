@@ -52,6 +52,30 @@ def shorten_url(
         "created_at": new_url.created_at,
     }
 
+
+def log_click(
+    db: Session,
+    url_id: int,
+    referrer: str | None,
+    user_agent: str | None,
+):
+    """
+    This runs AFTER the redirect response has already been sent to the client.
+    The user is not waiting for this — they already got their redirect.
+    """
+    try:
+        click = models.Click(
+            url_id=url_id,
+            referrer=referrer,
+            user_agent=user_agent,
+        )
+        db.add(click)
+        db.commit()
+    except Exception as e:
+        print(f"Failed to log click: {e}")
+        db.rollback()
+
+
 @router.get("/{code}")
 def redirect_to_url(
     code: str,
@@ -67,15 +91,12 @@ def redirect_to_url(
     Click is logged asynchronously after the response is sent.
     """
     cache_key = f"url:{code}"
-
-    # Step 1: check Redis first
     cached_url = cache.get(cache_key)
 
     if cached_url:
         original_url = cached_url
-        url_id = None          # we'll need the id for click logging
+        url_id = None
     else:
-        # Step 2: cache miss — query Postgres
         url_obj = db.query(models.URL).filter(
             models.URL.short_code == code
         ).first()
@@ -86,10 +107,8 @@ def redirect_to_url(
         original_url = url_obj.original_url
         url_id = url_obj.id
 
-        # Step 3: store in Redis for 1 hour (3600 seconds)
         cache.setex(cache_key, 3600, original_url)
 
-    # Step 4: schedule click logging to run after response is sent
     if url_id:
         background_tasks.add_task(
             log_click,
