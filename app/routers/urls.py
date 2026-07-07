@@ -51,3 +51,52 @@ def shorten_url(
         "short_url": f"{BASE_URL}/{new_url.short_code}",
         "created_at": new_url.created_at,
     }
+
+@router.get("/{code}")
+def redirect_to_url(
+    code: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    cache=Depends(get_cache),
+):
+    """
+    Look up the short code and redirect.
+    Cache hit  → Redis lookup (sub-millisecond, no DB query)
+    Cache miss → Postgres query, then cache the result for 1 hour
+    Click is logged asynchronously after the response is sent.
+    """
+    cache_key = f"url:{code}"
+
+    # Step 1: check Redis first
+    cached_url = cache.get(cache_key)
+
+    if cached_url:
+        original_url = cached_url
+        url_id = None          # we'll need the id for click logging
+    else:
+        # Step 2: cache miss — query Postgres
+        url_obj = db.query(models.URL).filter(
+            models.URL.short_code == code
+        ).first()
+
+        if not url_obj:
+            raise HTTPException(status_code=404, detail="Short URL not found")
+
+        original_url = url_obj.original_url
+        url_id = url_obj.id
+
+        # Step 3: store in Redis for 1 hour (3600 seconds)
+        cache.setex(cache_key, 3600, original_url)
+
+    # Step 4: schedule click logging to run after response is sent
+    if url_id:
+        background_tasks.add_task(
+            log_click,
+            db=db,
+            url_id=url_id,
+            referrer=request.headers.get("referer"),
+            user_agent=request.headers.get("user-agent"),
+        )
+
+    return RedirectResponse(url=original_url, status_code=302)
